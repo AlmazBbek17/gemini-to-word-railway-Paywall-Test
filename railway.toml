@@ -2,4 +2,4 @@
 builder = "nixpacks"
 
 [build.nixpacksPlan.phases.setup]
-nixPkgs = ["libxslt", "libxml2", "python312"]
+nixPkgs = ["libxslt", "libxml2", "python312", "pango", "cairo", "gdk-pixbuf", "libffi", "shared-mime-info", "fontconfig"]
