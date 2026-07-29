@@ -5,3 +5,5 @@ lxml==5.1.0
 gunicorn==22.0.0
 gevent==24.2.1
 standardwebhooks==1.0.1
+weasyprint==62.3
+markdown==3.7

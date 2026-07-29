@@ -17,6 +17,27 @@ from lxml import etree
 import copy
 from datetime import datetime
 
+# Both markdown and weasyprint are only needed for MD/PDF export. Import
+# defensively — if either fails to install/load for any reason (missing
+# from requirements.txt, build cache issue, missing system libs, etc),
+# only those two export formats break, never the whole app (docx export,
+# payment webhooks, /api/status, etc keep working regardless).
+try:
+    import markdown as md_lib
+    MARKDOWN_AVAILABLE = True
+except Exception as _md_err:
+    md_lib = None
+    MARKDOWN_AVAILABLE = False
+    print(f"[WARN] markdown library unavailable, PDF export disabled: {_md_err}")
+
+try:
+    from weasyprint import HTML as WeasyHTML
+    WEASYPRINT_AVAILABLE = True
+except Exception as _weasy_err:
+    WeasyHTML = None
+    WEASYPRINT_AVAILABLE = False
+    print(f"[WARN] WeasyPrint unavailable, PDF export disabled: {_weasy_err}")
+
 import sqlite3
 from contextlib import contextmanager
 from standardwebhooks.webhooks import Webhook, WebhookVerificationError
@@ -29,12 +50,25 @@ CORS(app)
 # ============================================================
 DODO_WEBHOOK_SECRET = os.environ.get('DODO_WEBHOOK_SECRET', '')
 
+# Legacy products — still used by older installed versions of the extension.
+# Do NOT remove or change these IDs; existing users' checkout links point here.
 PRODUCTS = {
     'monthly':  'pdt_0Nh18HtHXIP9Od1cy1DoE',
     'yearly':   'pdt_0Nh18Xr5AvKcgtPL3AYGT',
     'lifetime': 'pdt_0Nh18pGGx3eNDK1y4p6a0',
 }
+
+# New products (2026 pricing) — TODO: fill in the real pdt_ IDs once created
+# in Dodo Payments. Both old and new IDs map to the same plan name, so the
+# webhook records a clean 'monthly'/'yearly' regardless of which checkout
+# link (old or new extension version) the customer used.
+PRODUCTS_V2 = {
+    'monthly':  'pdt_REPLACE_MONTHLY',
+    'yearly':   'pdt_REPLACE_YEARLY',
+}
+
 PRODUCT_TO_PLAN = {v: k for k, v in PRODUCTS.items()}
+PRODUCT_TO_PLAN.update({v: k for k, v in PRODUCTS_V2.items()})
 
 FREE_LIMIT = 3
 
@@ -888,8 +922,87 @@ def export_chat():
 
 
 # ============================================================
-# DODO PAYMENTS — WEBHOOK & STATUS (below)
+# EXPORT CHAT AS PDF
 # ============================================================
+PDF_PAGE_CSS = """
+@page { size: A4; margin: 2cm; }
+body { font-family: 'DejaVu Sans', Arial, sans-serif; font-size: 11pt; line-height: 1.5; color: #202124; }
+h1 { text-align: center; font-size: 20pt; margin-bottom: 4pt; }
+.pdf-date { text-align: center; color: #666; font-size: 9pt; margin-bottom: 24pt; }
+.msg-role { font-weight: 700; font-size: 13pt; margin-top: 18pt; margin-bottom: 6pt; }
+.msg-role.user { color: rgb(33, 150, 243); }
+.msg-role.model { color: rgb(76, 175, 80); }
+.msg-divider { border: none; border-top: 1px solid #ccc; margin: 16pt 0; }
+pre, code { font-family: 'DejaVu Sans Mono', monospace; background: #f5f5f5; }
+pre { padding: 8pt; border-radius: 4pt; overflow-x: auto; white-space: pre-wrap; }
+code { padding: 1pt 4pt; border-radius: 3pt; }
+table { border-collapse: collapse; width: 100%; margin: 8pt 0; }
+th, td { border: 1px solid #ccc; padding: 4pt 8pt; text-align: left; }
+th { background: #f5f5f5; }
+blockquote { border-left: 3px solid #ccc; margin: 8pt 0; padding-left: 10pt; color: #555; }
+img { max-width: 100%; }
+"""
+
+MD_EXTENSIONS = ['extra', 'sane_lists', 'nl2br']
+
+def content_to_html(content):
+    """Same markdown-ish content format used for the .docx/.md exports —
+    render it through the `markdown` library rather than reimplementing
+    a parser here."""
+    return md_lib.markdown(content or '', extensions=MD_EXTENSIONS)
+
+
+@app.route('/api/export-chat-pdf', methods=['POST'])
+def export_chat_pdf():
+    if not WEASYPRINT_AVAILABLE or not MARKDOWN_AVAILABLE:
+        return jsonify({'error': 'PDF export is temporarily unavailable on this server'}), 503
+
+    try:
+        data = request.get_json(force=True)
+        messages = data.get('messages', [])
+        title = data.get('title', 'Gemini Chat')
+
+        if not messages:
+            return jsonify({'error': 'No messages'}), 400
+
+        body_parts = []
+        for i, msg in enumerate(messages):
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            role_label = 'You' if role == 'user' else 'Gemini'
+            role_class = 'user' if role == 'user' else 'model'
+
+            body_parts.append(f'<div class="msg-role {role_class}">{role_label}</div>')
+            body_parts.append(content_to_html(content))
+
+            if i < len(messages) - 1:
+                body_parts.append('<hr class="msg-divider">')
+
+        html_doc = f"""
+        <html>
+          <head><meta charset="utf-8"><style>{PDF_PAGE_CSS}</style></head>
+          <body>
+            <h1>{title}</h1>
+            <div class="pdf-date">{datetime.now().strftime('%d.%m.%Y %H:%M')}</div>
+            {''.join(body_parts)}
+          </body>
+        </html>
+        """
+
+        pdf_bytes = WeasyHTML(string=html_doc).write_pdf()
+        buf = io.BytesIO(pdf_bytes)
+        buf.seek(0)
+
+        return send_file(
+            buf,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name='gemini-chat.pdf'
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 
 # ============================================================
@@ -957,6 +1070,54 @@ def check_status():
         return jsonify({'active': False})
 
     return jsonify(get_user_status(email))
+
+
+# ============================================================
+# ADMIN: manually grant/revoke PRO (e.g. lifetime access for
+# yourself, testers, or support cases). Protected by a secret
+# set in the ADMIN_SECRET env var on Railway — never hardcode it.
+# ============================================================
+@app.route('/api/admin/grant', methods=['POST'])
+def admin_grant():
+    admin_secret = os.environ.get('ADMIN_SECRET', '')
+    if not admin_secret or request.headers.get('X-Admin-Secret', '') != admin_secret:
+        return jsonify({'error': 'unauthorized'}), 401
+
+    data = request.get_json(force=True, silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    if not email:
+        return jsonify({'error': 'email required'}), 400
+
+    active = bool(data.get('active', True))
+    plan = data.get('plan', 'lifetime')
+
+    set_user_status(email, active=active, plan=plan)
+    return jsonify({'ok': True, 'email': email, 'active': active, 'plan': plan})
+
+
+@app.route('/api/admin/list', methods=['GET'])
+def admin_list():
+    admin_secret = os.environ.get('ADMIN_SECRET', '')
+    if not admin_secret or request.headers.get('X-Admin-Secret', '') != admin_secret:
+        return jsonify({'error': 'unauthorized'}), 401
+
+    active_only = request.args.get('active_only', 'false').lower() == 'true'
+
+    with get_db() as conn:
+        if active_only:
+            rows = conn.execute(
+                'SELECT email, active, plan, since FROM paid_users WHERE active = 1 ORDER BY since DESC'
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT email, active, plan, since FROM paid_users ORDER BY since DESC'
+            ).fetchall()
+
+    users = [
+        {'email': r[0], 'active': bool(r[1]), 'plan': r[2], 'since': r[3]}
+        for r in rows
+    ]
+    return jsonify({'ok': True, 'count': len(users), 'users': users})
 
 
 # ============================================================
