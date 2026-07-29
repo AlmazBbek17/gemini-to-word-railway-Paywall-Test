@@ -39,6 +39,7 @@ except Exception as _weasy_err:
     print(f"[WARN] WeasyPrint unavailable, PDF export disabled: {_weasy_err}")
 
 import sqlite3
+import gevent
 from contextlib import contextmanager
 from standardwebhooks.webhooks import Webhook, WebhookVerificationError
 
@@ -989,7 +990,15 @@ def export_chat_pdf():
         </html>
         """
 
-        pdf_bytes = WeasyHTML(string=html_doc).write_pdf()
+        # WeasyPrint's rendering (Pango/Cairo) is a blocking native C call —
+        # gevent's cooperative scheduler can't preempt it, so running it
+        # directly on the greenlet would freeze the ENTIRE worker (including
+        # unrelated requests, like docx exports, routed to the same worker)
+        # for the duration. Offload it to gevent's real-OS-thread pool so
+        # the worker's event loop stays free to serve other requests.
+        pdf_bytes = gevent.get_hub().threadpool.spawn(
+            lambda: WeasyHTML(string=html_doc).write_pdf()
+        ).get()
         buf = io.BytesIO(pdf_bytes)
         buf.seek(0)
 
