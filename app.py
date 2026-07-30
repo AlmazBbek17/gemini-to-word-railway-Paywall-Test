@@ -38,6 +38,17 @@ except Exception as _weasy_err:
     WEASYPRINT_AVAILABLE = False
     print(f"[WARN] WeasyPrint unavailable, PDF export disabled: {_weasy_err}")
 
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # headless, no display/GUI backend needed on a server
+    import matplotlib.pyplot as plt
+    import io as _mpl_io
+    import base64 as _b64
+    MATPLOTLIB_AVAILABLE = True
+except Exception as _mpl_err:
+    MATPLOTLIB_AVAILABLE = False
+    print(f"[WARN] matplotlib unavailable, PDF formulas will render as plain text: {_mpl_err}")
+
 import sqlite3
 import gevent
 from contextlib import contextmanager
@@ -946,11 +957,61 @@ img { max-width: 100%; }
 
 MD_EXTENSIONS = ['extra', 'sane_lists', 'nl2br']
 
+def render_latex_to_img(latex, display=False):
+    """Render a LaTeX-ish math expression to a small PNG via matplotlib's
+    mathtext parser (pure Python, no system TeX needed). Returns an <img>
+    tag with the image inlined as base64, or None if rendering fails."""
+    if not MATPLOTLIB_AVAILABLE:
+        return None
+    try:
+        fontsize = 16 if display else 13
+        fig = plt.figure(figsize=(0.01, 0.01))
+        fig.text(0, 0, f'${latex}$', fontsize=fontsize)
+        buf = _mpl_io.BytesIO()
+        fig.savefig(buf, format='png', dpi=200, bbox_inches='tight', pad_inches=0.05, transparent=True)
+        plt.close(fig)
+        buf.seek(0)
+        encoded = _b64.b64encode(buf.read()).decode('ascii')
+        style = 'display:block;margin:8pt auto;' if display else 'vertical-align:middle;'
+        return f'<img src="data:image/png;base64,{encoded}" style="{style}" alt="formula">'
+    except Exception as e:
+        print(f"[WARN] formula render failed for {latex!r}: {e}")
+        return None
+
+
+def render_formulas_in_content(content):
+    """Replace $$...$$ (block) and $...$ (inline) LaTeX-ish math with
+    rendered images, skipping fenced code blocks so literal $ in code
+    isn't touched."""
+    if not MATPLOTLIB_AVAILABLE or not content:
+        return content
+
+    parts = re.split(r'(```.*?```)', content, flags=re.DOTALL)
+    for i, part in enumerate(parts):
+        if part.startswith('```'):
+            continue  # leave code blocks untouched
+
+        def _block_sub(m):
+            img = render_latex_to_img(m.group(1).strip(), display=True)
+            return img if img else m.group(0)
+        part = re.sub(r'\$\$(.+?)\$\$', _block_sub, part, flags=re.DOTALL)
+
+        def _inline_sub(m):
+            img = render_latex_to_img(m.group(1).strip(), display=False)
+            return img if img else m.group(0)
+        part = re.sub(r'(?<!\$)\$(?!\$)([^\$\n]+?)(?<!\$)\$(?!\$)', _inline_sub, part)
+
+        parts[i] = part
+    return ''.join(parts)
+
+
 def content_to_html(content):
     """Same markdown-ish content format used for the .docx/.md exports —
     render it through the `markdown` library rather than reimplementing
-    a parser here."""
-    return md_lib.markdown(content or '', extensions=MD_EXTENSIONS)
+    a parser here. LaTeX-ish $$...$$ / $...$ formulas are rendered to
+    images first, since the `markdown` library has no concept of math."""
+    content = render_formulas_in_content(content or '')
+    return md_lib.markdown(content, extensions=MD_EXTENSIONS)
 
 
 @app.route('/api/export-chat-pdf', methods=['POST'])
@@ -966,39 +1027,47 @@ def export_chat_pdf():
         if not messages:
             return jsonify({'error': 'No messages'}), 400
 
-        body_parts = []
-        for i, msg in enumerate(messages):
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-            role_label = 'You' if role == 'user' else 'Gemini'
-            role_class = 'user' if role == 'user' else 'model'
+        def _build_pdf():
+            # Everything here is blocking CPU work (matplotlib formula
+            # rendering + WeasyPrint's native Pango/Cairo calls) — none of
+            # it is gevent-aware, so it all needs to run inside the
+            # threadpool together, not just the final write_pdf() call,
+            # or earlier steps would still freeze the worker.
+            body_parts = []
+            for i, msg in enumerate(messages):
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+                role_label = 'You' if role == 'user' else 'Gemini'
+                role_class = 'user' if role == 'user' else 'model'
 
-            body_parts.append(f'<div class="msg-role {role_class}">{role_label}</div>')
-            body_parts.append(content_to_html(content))
+                body_parts.append(f'<div class="msg-role {role_class}">{role_label}</div>')
+                body_parts.append(content_to_html(content))
 
-            if i < len(messages) - 1:
-                body_parts.append('<hr class="msg-divider">')
+                if i < len(messages) - 1:
+                    body_parts.append('<hr class="msg-divider">')
 
-        html_doc = f"""
-        <html>
-          <head><meta charset="utf-8"><style>{PDF_PAGE_CSS}</style></head>
-          <body>
-            <h1>{title}</h1>
-            <div class="pdf-date">{datetime.now().strftime('%d.%m.%Y %H:%M')}</div>
-            {''.join(body_parts)}
-          </body>
-        </html>
-        """
+            html_doc = f"""
+            <html>
+              <head><meta charset="utf-8"><style>{PDF_PAGE_CSS}</style></head>
+              <body>
+                <h1>{title}</h1>
+                <div class="pdf-date">{datetime.now().strftime('%d.%m.%Y %H:%M')}</div>
+                {''.join(body_parts)}
+              </body>
+            </html>
+            """
 
-        # WeasyPrint's rendering (Pango/Cairo) is a blocking native C call —
-        # gevent's cooperative scheduler can't preempt it, so running it
-        # directly on the greenlet would freeze the ENTIRE worker (including
-        # unrelated requests, like docx exports, routed to the same worker)
-        # for the duration. Offload it to gevent's real-OS-thread pool so
-        # the worker's event loop stays free to serve other requests.
-        pdf_bytes = gevent.get_hub().threadpool.spawn(
-            lambda: WeasyHTML(string=html_doc).write_pdf()
-        ).get()
+            return WeasyHTML(string=html_doc).write_pdf()
+
+        # WeasyPrint's rendering (Pango/Cairo) and matplotlib's formula
+        # rendering are both blocking native/CPU calls — gevent's
+        # cooperative scheduler can't preempt them, so running them
+        # directly on the greenlet would freeze the ENTIRE worker
+        # (including unrelated requests, like docx exports, routed to
+        # the same worker) for the duration. Offload to gevent's
+        # real-OS-thread pool so the worker's event loop stays free to
+        # serve other requests concurrently.
+        pdf_bytes = gevent.get_hub().threadpool.spawn(_build_pdf).get()
         buf = io.BytesIO(pdf_bytes)
         buf.seek(0)
 
