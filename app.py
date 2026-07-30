@@ -82,7 +82,38 @@ PRODUCTS_V2 = {
 PRODUCT_TO_PLAN = {v: k for k, v in PRODUCTS.items()}
 PRODUCT_TO_PLAN.update({v: k for k, v in PRODUCTS_V2.items()})
 
-FREE_LIMIT = 3
+FREE_LIMIT = 3  # legacy, unused — kept only to avoid breaking any external reference
+
+# ============================================================
+# CENTRALIZED CLIENT CONFIG — limits (env vars, Railway-editable without
+# a redeploy of the extension) and prices (still edited here, but a
+# Railway redeploy takes minutes vs. days for a Chrome Web Store review).
+# ============================================================
+FREE_TOTAL_LIMIT = int(os.environ.get('FREE_TOTAL_LIMIT', '10'))
+DAILY_FREE_LIMIT = int(os.environ.get('DAILY_FREE_LIMIT', '1'))
+
+# TODO: once we can verify Dodo's Products API (exact endpoint/auth), swap
+# these hardcoded numbers for a live fetch from Dodo so a price change in
+# the Dodo dashboard alone propagates here automatically. For now this is
+# still centralized (redeploy here, no extension update needed) — just
+# not auto-synced with Dodo's dashboard yet.
+PRICES_CONFIG = {
+    'monthly': {'regular': 4.99, 'discounted': 3.77},
+    'yearly': {
+        'regular': 45.24, 'discounted': 23.87,
+        'regularPerMonth': 3.77, 'discountedPerMonth': 1.99,
+    },
+}
+
+@app.route('/api/config', methods=['GET'])
+def get_client_config():
+    return jsonify({
+        'freeTotalLimit': FREE_TOTAL_LIMIT,
+        'dailyFreeLimit': DAILY_FREE_LIMIT,
+        'prices': PRICES_CONFIG,
+    })
+
+
 
 # ============================================================
 # PERSISTENT STORAGE — SQLite on Railway volume
