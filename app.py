@@ -971,12 +971,39 @@ def render_latex_to_img(latex, display=False):
         fig.savefig(buf, format='png', dpi=200, bbox_inches='tight', pad_inches=0.05, transparent=True)
         plt.close(fig)
         buf.seek(0)
-        encoded = _b64.b64encode(buf.read()).decode('ascii')
-        style = 'display:block;margin:8pt auto;' if display else 'vertical-align:middle;'
+        png_bytes = buf.read()
+
+        # PNGs from matplotlib don't reliably carry DPI metadata, and
+        # PDF renderers disagree on how to interpret pixels without it —
+        # that's what caused wildly inconsistent formula sizes (some huge,
+        # some tiny) in testing. Sidestep the ambiguity entirely: read the
+        # image's actual pixel aspect ratio and size it in `em` units
+        # (relative to the surrounding paragraph's font size) instead of
+        # relying on any physical/DPI-based sizing.
+        width_px, height_px = _png_dimensions(png_bytes)
+        aspect = (width_px / height_px) if height_px else 1
+        height_em = 1.5 if display else 1.1
+        width_em = round(height_em * aspect, 3)
+
+        encoded = _b64.b64encode(png_bytes).decode('ascii')
+        if display:
+            style = f'display:block;margin:8pt auto;height:{height_em}em;width:{width_em}em;'
+        else:
+            style = f'vertical-align:middle;height:{height_em}em;width:{width_em}em;'
         return f'<img src="data:image/png;base64,{encoded}" style="{style}" alt="formula">'
     except Exception as e:
         print(f"[WARN] formula render failed for {latex!r}: {e}")
         return None
+
+
+def _png_dimensions(png_bytes):
+    """Read width/height (pixels) straight from the PNG header — avoids
+    pulling in PIL just for this."""
+    if png_bytes[:8] != b'\x89PNG\r\n\x1a\n':
+        return (1, 1)
+    width = int.from_bytes(png_bytes[16:20], 'big')
+    height = int.from_bytes(png_bytes[20:24], 'big')
+    return (width, height or 1)
 
 
 def render_formulas_in_content(content):
