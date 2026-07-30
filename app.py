@@ -948,8 +948,8 @@ h1 { text-align: center; font-size: 20pt; margin-bottom: 4pt; }
 pre, code { font-family: 'DejaVu Sans Mono', monospace; background: #f5f5f5; }
 pre { padding: 8pt; border-radius: 4pt; overflow-x: auto; white-space: pre-wrap; }
 code { padding: 1pt 4pt; border-radius: 3pt; }
-table { border-collapse: collapse; width: 100%; margin: 8pt 0; }
-th, td { border: 1px solid #ccc; padding: 4pt 8pt; text-align: left; }
+table { border-collapse: collapse; width: 100%; max-width: 100%; table-layout: fixed; margin: 8pt 0; }
+th, td { border: 1px solid #ccc; padding: 4pt 8pt; text-align: left; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; }
 th { background: #f5f5f5; }
 blockquote { border-left: 3px solid #ccc; margin: 8pt 0; padding-left: 10pt; color: #555; }
 img { max-width: 100%; }
