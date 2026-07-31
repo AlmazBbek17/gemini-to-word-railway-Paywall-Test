@@ -207,6 +207,12 @@ def make_run(text, italic=True, bold=False):
     rfonts = sub_el(wrpr, W_NS, 'rFonts')
     rfonts.set(f'{{{W_NS}}}ascii', 'Cambria Math')
     rfonts.set(f'{{{W_NS}}}hAnsi', 'Cambria Math')
+    # Cambria Math renders visually smaller than body text at the same
+    # nominal point size (a known Word quirk) — bump it up a bit so
+    # formulas look proportionate to the surrounding paragraph text
+    # instead of noticeably tiny. 26 half-points = 13pt.
+    sz = sub_el(wrpr, W_NS, 'sz')
+    sz.set(f'{{{W_NS}}}val', '26')
     t = sub_el(r, MATH_NS, 't')
     t.text = text
     t.set(f'{{{W_NS}}}space', 'preserve')
