@@ -777,10 +777,22 @@ def process_content(doc, content):
 
         # Normal paragraph
         p = doc.add_paragraph()
-        _text_math(doc, stripped) if ('$$' in stripped or (stripped.count('$') >= 2)) else _fmt(p, stripped)
-        if '$' in stripped:
-            p.clear()
+        if '$$' in stripped:
+            # Block formula(s) present — _text_math adds its own paragraph(s)
+            # internally, so don't populate the placeholder `p` at all.
+            p._element.getparent().remove(p._element)
+            _text_math(doc, stripped)
+        elif '$' in stripped:
+            # Inline-only math (single $...$ pairs, no $$) — handle directly
+            # on the placeholder paragraph. Previously this ALSO ran
+            # through _text_math first (whenever count('$') >= 2, true for
+            # any inline pair too), which — finding no literal "$$" —  fell
+            # into _text_math's single-paragraph fallback and added a
+            # second, duplicate paragraph with the raw "$...$" text still
+            # in it, right alongside the correctly-rendered one below.
             _text_math_inline(p, stripped)
+        else:
+            _fmt(p, stripped)
         i += 1
 
 def _text_math(doc, text):
