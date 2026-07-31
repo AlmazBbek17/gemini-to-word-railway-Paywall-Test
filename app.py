@@ -75,12 +75,24 @@ PRODUCTS = {
 # webhook records a clean 'monthly'/'yearly' regardless of which checkout
 # link (old or new extension version) the customer used.
 PRODUCTS_V2 = {
-    'monthly':  'pdt_REPLACE_MONTHLY',
-    'yearly':   'pdt_REPLACE_YEARLY',
+    'monthly_regular':     'pdt_0NkIxeDpTYW8G8wbrzZok',
+    'monthly_discounted':  'pdt_0NkIxYCpjmwZik7rbztSH',
+    'yearly_regular':      'pdt_0NkIy433ugvYHxlnt6yS6',
+    'yearly_discounted':   'pdt_0NkIxqS1tLIxEDv3cJk3z',
+}
+
+# Webhook plan lookup only cares about monthly vs yearly, not which price
+# tier was charged — so both the regular and discounted product IDs for a
+# plan map to the same plan name here.
+PRODUCTS_V2_TO_PLAN = {
+    'pdt_0NkIxeDpTYW8G8wbrzZok': 'monthly',
+    'pdt_0NkIxYCpjmwZik7rbztSH': 'monthly',
+    'pdt_0NkIy433ugvYHxlnt6yS6': 'yearly',
+    'pdt_0NkIxqS1tLIxEDv3cJk3z': 'yearly',
 }
 
 PRODUCT_TO_PLAN = {v: k for k, v in PRODUCTS.items()}
-PRODUCT_TO_PLAN.update({v: k for k, v in PRODUCTS_V2.items()})
+PRODUCT_TO_PLAN.update(PRODUCTS_V2_TO_PLAN)
 
 FREE_LIMIT = 3  # legacy, unused — kept only to avoid breaking any external reference
 
