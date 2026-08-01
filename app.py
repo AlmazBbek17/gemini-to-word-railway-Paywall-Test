@@ -3,6 +3,28 @@ from flask_cors import CORS
 import json
 import io
 import re
+
+# Both needed for embedding images in the docx export. requests is a
+# lightweight, well-behaved dependency (no native-lib surprises like
+# weasyprint/matplotlib gave us earlier). Pillow should already be
+# present transitively via weasyprint, but import defensively anyway —
+# if either is missing, images fall back to a plain "[Image: alt]"
+# placeholder instead of breaking the whole export.
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except Exception as _requests_err:
+    requests = None
+    REQUESTS_AVAILABLE = False
+    print(f"[WARN] requests unavailable, image URLs (non-base64) won't embed: {_requests_err}")
+
+try:
+    from PIL import Image as PILImage
+    PIL_AVAILABLE = True
+except Exception as _pil_err:
+    PILImage = None
+    PIL_AVAILABLE = False
+    print(f"[WARN] Pillow unavailable, images will embed at a fixed default width: {_pil_err}")
 import traceback
 import os
 import hmac
@@ -670,6 +692,32 @@ def parse_matrix_env(latex):
 
 def build_omath(latex):
     omath = make_el(MATH_NS, 'oMath')
+    s = latex.strip()
+
+    # Full expression is a matrix (\begin{matrix}/pmatrix/bmatrix/etc)
+    mat = parse_matrix_env(s)
+    if mat is not None:
+        omath.append(mat)
+        return omath
+
+    # Expression contains \begin{ somewhere (prefix text + a matrix), e.g.
+    # "A = \begin{pmatrix}...\end{pmatrix}" — this was previously dropped
+    # entirely since build_omath only ever called parse_latex directly.
+    begin_idx = s.find(chr(92) + 'begin{')
+    if begin_idx >= 0:
+        prefix = s[:begin_idx].strip()
+        rest = s[begin_idx:]
+        if prefix:
+            for el in (parse_latex(prefix) or []):
+                omath.append(el)
+        mat2 = parse_matrix_env(rest)
+        if mat2 is not None:
+            omath.append(mat2)
+        else:
+            for el in (parse_latex(rest) or []):
+                omath.append(el)
+        return omath
+
     elements = parse_latex(latex)
     for el in elements:
         omath.append(el)
@@ -686,12 +734,64 @@ def add_block_formula(doc, latex):
     p._p.append(omath)
     return p
 
+def embed_image_from_markdown(doc, alt_text, src):
+    """Decode a base64 data: URI or fetch an http(s) URL and embed it as
+    a real picture in the Word doc — instead of the raw markdown
+    (often a huge base64 string) getting dumped as literal text."""
+    try:
+        if src.startswith('data:image/'):
+            _, b64data = src.split(',', 1)
+            img_bytes = base64.b64decode(b64data)
+        elif src.startswith('http'):
+            resp = requests.get(src, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
+            resp.raise_for_status()
+            img_bytes = resp.content
+        else:
+            raise ValueError(f'unsupported image src: {src[:50]}')
+
+        img_stream = io.BytesIO(img_bytes)
+
+        # Cap display width at 5.5in (fits standard page margins) without
+        # upscaling naturally-smaller images like small screenshots.
+        width = Inches(5.5)
+        try:
+            with PILImage.open(img_stream) as pil_img:
+                px_w = pil_img.size[0]
+            natural_inches = px_w / 96  # assume 96 DPI, a safe generic default
+            width = Inches(min(natural_inches, 5.5))
+        except Exception:
+            pass  # fall back to the 5.5in default if Pillow can't read it
+        img_stream.seek(0)
+
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p.add_run()
+        run.add_picture(img_stream, width=width)
+    except Exception as e:
+        print(f"[WARN] Could not embed image ({alt_text!r}): {e}")
+        p = doc.add_paragraph()
+        run = p.add_run(f'[Image: {alt_text}]' if alt_text else '[Image]')
+        run.italic = True
+
 def process_content(doc, content):
     lines = content.split('\n')
     i = 0
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
+
+        # Image (markdown ![alt](src) — src is either a data: URI or an
+        # http(s) URL). Must be checked before anything else, since a
+        # base64 data URI would otherwise get dumped as garbled plain
+        # text by the fallback paragraph handler below. Uses re.search
+        # (not an anchored full-line match) since the image markdown
+        # isn't always perfectly isolated on its own line — e.g. Gemini's
+        # "AI generated" caption can end up sharing the line.
+        img_match = re.search(r'!\[([^\]]*)\]\(([^\)]+)\)', stripped)
+        if img_match:
+            embed_image_from_markdown(doc, img_match.group(1), img_match.group(2))
+            i += 1
+            continue
 
         # Code block
         if stripped.startswith('```'):
@@ -926,9 +1026,6 @@ def _code(doc, code):
     shd.set(qn('w:color'), 'auto')
     shd.set(qn('w:fill'), 'F5F5F5')
     pPr.append(shd)
-
-def _img(doc, src, alt=''):
-    pass
 
 # ============================================================
 # HEALTH CHECK
