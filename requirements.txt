@@ -9,3 +9,5 @@ weasyprint==62.3
 pydyf==0.11.0
 markdown==3.7
 matplotlib==3.9.2
+requests==2.32.3
+Pillow==12.3.0
