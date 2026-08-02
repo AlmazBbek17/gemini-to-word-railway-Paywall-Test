@@ -751,6 +751,15 @@ def embed_image_from_markdown(doc, alt_text, src):
 
         img_stream = io.BytesIO(img_bytes)
 
+        # Validate this is actually decodable image data before going any
+        # further — a hotlink-protected or dead image URL often returns an
+        # HTML error page (403, etc) with a 200 status, which would
+        # otherwise get embedded as a "picture" and render as corrupted
+        # garbage in the document instead of failing cleanly.
+        with PILImage.open(img_stream) as pil_img:
+            pil_img.verify()
+        img_stream.seek(0)
+
         # Cap display width at 5.5in (fits standard page margins) without
         # upscaling naturally-smaller images like small screenshots.
         width = Inches(5.5)
